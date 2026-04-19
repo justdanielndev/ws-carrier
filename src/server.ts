@@ -1,9 +1,52 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { PeerManager } from "./peers.js";
 import { loadBootstrapPeers } from "./bootstrap.js";
 import { generate44BitHexId, ID_BITS, K, MAX_ID, normalizeIdHex } from "./routing.js";
+
+loadDotenv(process.env.DOTENV_PATH ?? ".env");
+
+function loadDotenv(path: string): void {
+  const full = resolve(process.cwd(), path);
+  if (!existsSync(full)) {
+    console.log(`[znp-carrier] no .env at ${full}; using process env only`);
+    return;
+  }
+  let loaded = 0;
+  let skipped = 0;
+  try {
+    const src = readFileSync(full, "utf8");
+    for (const rawLine of src.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const stripped = line.replace(/^export\s+/, "");
+      const eq = stripped.indexOf("=");
+      if (eq === -1) continue;
+      const key = stripped.slice(0, eq).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+      let val = stripped.slice(eq + 1).trim();
+      if (!(val.startsWith('"') || val.startsWith("'"))) {
+        const hash = val.indexOf(" #");
+        if (hash >= 0) val = val.slice(0, hash).trim();
+      }
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (process.env[key] === undefined) {
+        process.env[key] = val;
+        loaded++;
+      } else {
+        skipped++;
+      }
+    }
+    console.log(`[znp-carrier] loaded ${loaded} key(s) from ${full}${skipped ? ` (${skipped} already in env before)` : ""}`);
+  } catch (err) {
+    console.warn(`[znp-carrier] failed to read ${full}: ${(err as Error).message}`);
+  }
+}
 
 interface TransportCaps {
   type?: number;
