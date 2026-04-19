@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { PeerManager } from "./peers.js";
 import { loadBootstrapPeers } from "./bootstrap.js";
-import { generate44BitHexId, K, normalizeIdHex } from "./routing.js";
+import { generate44BitHexId, ID_BITS, K, MAX_ID, normalizeIdHex } from "./routing.js";
 
 interface TransportCaps {
   type?: number;
@@ -46,16 +46,60 @@ const RATE_BURST = Number(process.env.RATE_BURST ?? 100);
 const MAX_PAYLOAD_BYTES = 1024;
 export const MAX_FRAME_BYTES = 2048;
 
-const SERVER_ID = resolveServerId(process.env.SERVER_ID);
+const { id: SERVER_ID, generated: SERVER_ID_EPHEMERAL } = resolveServerId(process.env.SERVER_ID);
 const SERVER_ADDR = process.env.SERVER_ADDR ?? null;
 
-function resolveServerId(raw: string | undefined): string {
-  if (raw) {
-    const norm = normalizeIdHex(raw);
-    if (!norm) throw new Error(`SERVER_ID must be 1–12 hex chars in the 44-bit space: got "${raw}"`);
-    return norm;
+function die(msg: string): never {
+  console.error(`[znp-carrier] fatal: ${msg}`);
+  process.exit(1);
+}
+
+function genCmd(): string {
+  return `node -e 'const b=require("crypto").randomBytes(6);b[0]&=0x0f;console.log(b.toString("hex"))'`;
+}
+
+function resolveServerId(raw: string | undefined): { id: string; generated: boolean } {
+  if (raw === undefined || raw === "") {
+    return { id: generate44BitHexId(randomBytes(6)), generated: true };
   }
-  return generate44BitHexId(randomBytes(6));
+
+  // Strip common noise users might paste by accident.
+  let s = raw.trim().toLowerCase();
+  if (s.startsWith("0x")) s = s.slice(2);
+
+  if (s.length === 0) {
+    die(`SERVER_ID is empty. Unset the variable to auto-generate, or provide a value. Generate one with:\n  ${genCmd()}`);
+  }
+  if (!/^[0-9a-f]+$/.test(s)) {
+    die(`SERVER_ID must contain only hex characters [0-9a-f]. Got: "${raw}"`);
+  }
+  if (s.length > 12) {
+    die(`SERVER_ID must be at most 12 hex characters (44-bit id). Got ${s.length} chars: "${s}"`);
+  }
+
+  const n = BigInt("0x" + s);
+
+  if (n > MAX_ID) {
+    const low44 = n & MAX_ID;
+    const low44Hex = low44.toString(16).padStart(12, "0");
+    const lowReserved = low44 === 0n || low44 === MAX_ID;
+    const fixes = lowReserved
+      ? `  • Generate a fresh valid id:\n      ${genCmd()}`
+      : `  • Use the low ${ID_BITS} bits: SERVER_ID=${low44Hex}\n` +
+        `  • Or generate a fresh valid id:\n      ${genCmd()}`;
+    die(
+      `SERVER_ID ${s} has bits set above the ${ID_BITS}-bit keyspace ` +
+      `(top nibble must be 0). Fix:\n${fixes}`,
+    );
+  }
+  if (n === 0n) {
+    die(`SERVER_ID=0 is reserved (indistinguishable from unset). Pick any other value:\n  ${genCmd()}`);
+  }
+  if (n === MAX_ID) {
+    die(`SERVER_ID ${s} collides with the broadcast sentinel 0x${MAX_ID.toString(16)}. Pick any other value:\n  ${genCmd()}`);
+  }
+
+  return { id: n.toString(16).padStart(12, "0"), generated: false };
 }
 
 const registry = new Map<string, RegisteredWs>();
@@ -412,6 +456,11 @@ httpServer.listen(PORT, async () => {
   if (!SERVER_ADDR) {
     log(
       "WARNING: SERVER_ADDR not set. Peers will accept this carrier's DHT messages but clients that dht_query other carriers will not receive a dialable addr for this carrier. Set SERVER_ADDR=wss://... to participate as a routing destination.",
+    );
+  }
+  if (SERVER_ID_EPHEMERAL) {
+    log(
+      `WARNING: SERVER_ID not set — using ephemeral ${SERVER_ID}. After every restart peers will see this carrier as a new node, reshuffling routing tables and breaking in-flight peer_forwards. Set SERVER_ID=<12 hex chars, top nibble 0> to make identity stable. Generate: ${genCmd()}`,
     );
   }
   log(`dialing ${bootstrap.length} bootstrap peer(s)`);
