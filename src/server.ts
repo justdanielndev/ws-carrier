@@ -63,7 +63,6 @@ function resolveServerId(raw: string | undefined): { id: string; generated: bool
     return { id: generate44BitHexId(randomBytes(6)), generated: true };
   }
 
-  // Strip common noise users might paste by accident.
   let s = raw.trim().toLowerCase();
   if (s.startsWith("0x")) s = s.slice(2);
 
